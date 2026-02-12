@@ -1,0 +1,102 @@
+services:
+  # PostgreSQL база данных
+  db:
+    image: postgres:16-alpine
+    container_name: lessons_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lessons_db
+      POSTGRES_USER: lessons_user
+      POSTGRES_PASSWORD: lessons_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - lessons_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lessons_user -d lessons_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis для кеширования и сессий
+  redis:
+    image: redis:7-alpine
+    container_name: lessons_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - lessons_network
+    command: redis-server --appendonly yes
+
+  # Next.js приложение
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lessons_app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://lessons_user:lessons_password@db:5432/lessons_db?schema=public
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./uploads:/app/uploads
+      - app_logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - lessons_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Nginx reverse proxy (для продакшена)
+  nginx:
+    image: nginx:alpine
+    container_name: lessons_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/sites-available:/etc/nginx/conf.d:ro
+      - ./ssl:/etc/ssl/certs:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - app
+    networks:
+      - lessons_network
+    profiles:
+      - production
+
+# Постоянные тома
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  app_logs:
+    driver: local
+  nginx_logs:
+    driver: local
+
+# Сеть для сервисов
+networks:
+  lessons_network:
+    driver: bridge
